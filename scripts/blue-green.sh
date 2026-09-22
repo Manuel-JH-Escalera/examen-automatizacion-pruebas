@@ -33,13 +33,14 @@ escribir_conf() {
   mkdir -p "$CONF_DIR"
   cat > "$CONF_DIR/default.conf" <<EOF
 # Generado por scripts/blue-green.sh - slot activo: ${slot}
-upstream app_activa {
-    server app-${slot}:8080;
-}
 server {
     listen 80;
+    # Resolución DNS en tiempo de ejecución (DNS interno de Docker), para que el
+    # router no dependa de que el contenedor exista al arrancar o recargar.
+    resolver 127.0.0.11 valid=2s;
+    set \$destino "http://app-${slot}:8080";
     location / {
-        proxy_pass http://app_activa;
+        proxy_pass \$destino;
         proxy_set_header Host \$host;
         add_header X-Deploy-Slot "${slot}" always;
     }
@@ -53,7 +54,15 @@ up_router() {
   docker rm -f "$ROUTER" >/dev/null 2>&1 || true
   docker run -d --name "$ROUTER" --network "$RED" -p "${PUERTO_PUBLICO}:80" \
     -v "$CONF_DIR:/etc/nginx/conf.d:ro" nginx:alpine >/dev/null
-  log "Router nginx levantado en http://localhost:${PUERTO_PUBLICO} (slot inicial: blue)"
+  local i
+  for i in $(seq 1 15); do
+    if curl -s -o /dev/null "http://localhost:${PUERTO_PUBLICO}/"; then
+      log "Router nginx levantado en http://localhost:${PUERTO_PUBLICO} (slot inicial: blue)"
+      return 0
+    fi
+    sleep 1
+  done
+  log "El router no responde"; docker logs "$ROUTER"; return 1
 }
 
 start() {
