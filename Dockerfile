@@ -28,7 +28,7 @@ COPY --from=build /workspace/target/gestor-tareas-*.jar app.jar
 
 EXPOSE 8080
 
-# Health check usado por Docker/Coolify para decidir si el contenedor nuevo está sano
+# Health check usado por Docker y el pipeline Blue-Green para decidir si el contenedor nuevo está sano
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
   CMD curl -fs http://localhost:8080/actuator/health || exit 1
 
