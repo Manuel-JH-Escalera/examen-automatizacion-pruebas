@@ -9,8 +9,8 @@ pipeline de **integración continua** con pruebas unitarias e integración, y un
 **deployment pipeline** con pruebas de aceptación end-to-end, despliegue a un ambiente
 de pruebas y **rollback automático**.
 
-[![CI](https://github.com/OWNER/examen-automatizacion-pruebas/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/examen-automatizacion-pruebas/actions/workflows/ci.yml)
-[![CD](https://github.com/OWNER/examen-automatizacion-pruebas/actions/workflows/cd.yml/badge.svg)](https://github.com/OWNER/examen-automatizacion-pruebas/actions/workflows/cd.yml)
+[![CI](https://github.com/Manuel-JH-Escalera/examen-automatizacion-pruebas/actions/workflows/ci.yml/badge.svg)](https://github.com/Manuel-JH-Escalera/examen-automatizacion-pruebas/actions/workflows/ci.yml)
+[![CD](https://github.com/Manuel-JH-Escalera/examen-automatizacion-pruebas/actions/workflows/cd.yml/badge.svg)](https://github.com/Manuel-JH-Escalera/examen-automatizacion-pruebas/actions/workflows/cd.yml)
 
 ---
 
@@ -189,7 +189,7 @@ docker run -p 8080:8080 gestor-tareas
 ### Configuración necesaria para el deployment pipeline
 
 En Coolify se crea una aplicación de tipo **Docker Image** apuntando a
-`ghcr.io/<usuario>/gestor-tareas` con un dominio público y health check en `/actuator/health`.
+`ghcr.io/manuel-jh-escalera/gestor-tareas` con un dominio público y health check en `/actuator/health`.
 Luego, en el repositorio de GitHub (*Settings → Secrets and variables → Actions*):
 
 | Tipo | Nombre | Valor |
