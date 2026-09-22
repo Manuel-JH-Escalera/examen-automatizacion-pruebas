@@ -222,4 +222,4 @@ Las capturas de las ejecuciones se encuentran en `docs/capturas/`:
 | `05-cd-despliegue-exitoso.png` | Deployment pipeline exitoso: imagen, deploy Blue-Green, acceptance tests y promote |
 | `06-cd-blue-green-switch.png` | Log del cambio de tráfico de BLUE a GREEN y versión servida por el router |
 | `07-cd-rollback-automatico.png` | Ejecución con falla simulada: paso de rollback devolviendo el tráfico a BLUE |
-| `08-cd-resumen-rollback.png` | Summary de la ejecución con el rollback y las versiones involucradas |
+| `08-cd-resumen-rollback.png` | Anotaciones de la ejecución con falla simulada: error forzado y aviso de rollback a BLUE |
