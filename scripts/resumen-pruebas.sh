@@ -10,7 +10,7 @@ dir="$2"
 echo "## $titulo"
 echo
 if ! ls "$dir"/TEST-*.xml >/dev/null 2>&1; then
-  echo "_No se encontraron reportes en $dir_"
+  echo "_No se encontraron reportes en ${dir}_"
   exit 0
 fi
 
