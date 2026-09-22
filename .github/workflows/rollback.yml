@@ -37,7 +37,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Versión actual
-        run: echo "Antes del rollback: $(scripts/coolify.sh current-tag)"
+        run: |
+          echo "Antes del rollback: $(scripts/coolify.sh current-tag)"
 
       - name: Desplegar la versión indicada
         run: scripts/coolify.sh deploy "${{ inputs.tag }}"
