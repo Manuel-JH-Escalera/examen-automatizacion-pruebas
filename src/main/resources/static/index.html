@@ -89,7 +89,7 @@
     });
 
     fetch('/api/info').then(r => r.json()).then(i => {
-      document.getElementById('version').textContent = i.version + ' (' + i.commit + ')';
+      document.getElementById('version').textContent = i.version + ' (' + i.commit + ', ' + i.slot + ')';
     });
     cargar();
   </script>

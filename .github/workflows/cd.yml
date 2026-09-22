@@ -1,21 +1,21 @@
 # =============================================================================
-# DEPLOYMENT PIPELINE (CD) - ambiente de pruebas en Coolify
+# DEPLOYMENT PIPELINE (CD) - despliegue Blue-Green en ambiente de pruebas
 #
 # Se ejecuta al integrar cambios en "main" (fin del flujo GitFlow) o manualmente.
-# Stages:
-#   1. build-image        -> construye la imagen Docker y la publica en GHCR
-#                            con el tag inmutable "sha-<commit>"
-#   2. deploy-test        -> guarda el tag actualmente desplegado (para rollback)
-#                            y despliega el nuevo tag en Coolify
-#   3. acceptance-tests   -> pruebas de aceptación E2E con Selenium contra la URL
-#                            pública del ambiente de pruebas
-#   4. rollback           -> SOLO si fallan las pruebas de aceptación: vuelve al
-#                            tag anterior y verifica que quedó activo
-#   5. promote            -> SOLO si todo pasó: marca la imagen como "stable"
-#                            (última versión conocida como buena)
+# El ambiente de pruebas se levanta con Docker en el runner: un router nginx
+# que enruta el tráfico a un contenedor "blue" (versión estable actual) o
+# "green" (versión nueva). Ver scripts/blue-green.sh.
 #
-# Secrets requeridos: COOLIFY_URL, COOLIFY_TOKEN, COOLIFY_APP_UUID
-# Variable requerida: APP_BASE_URL (URL pública del ambiente de pruebas)
+# Stages:
+#   1. build-image   -> construye la imagen Docker y la publica en GHCR con el
+#                       tag inmutable "sha-<commit>"
+#   2. deploy-test   -> levanta el ambiente: BLUE con la última versión estable
+#                       y GREEN con la nueva; smoke test de GREEN; cambia el
+#                       tráfico del router a GREEN
+#   3. acceptance    -> pruebas de aceptación E2E (Selenium) contra el router
+#      (mismo job)      Si fallan: ROLLBACK automático (router vuelve a BLUE) y
+#                       verificación de que la versión anterior atiende
+#   4. promote       -> SOLO si todo pasó: marca la imagen como "stable"
 # =============================================================================
 name: CD - Deployment Pipeline
 
@@ -38,7 +38,6 @@ permissions:
   packages: write
 
 env:
-  REGISTRY: ghcr.io
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/gestor-tareas
 
 jobs:
@@ -46,79 +45,52 @@ jobs:
     name: "Stage 1 - Build y publicación de imagen"
     runs-on: ubuntu-latest
     outputs:
+      image: ${{ steps.meta.outputs.image }}
       tag: ${{ steps.meta.outputs.tag }}
       commit: ${{ steps.meta.outputs.commit }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Calcular tag de la imagen
+      - name: Calcular nombre y tag de la imagen
         id: meta
         run: |
+          echo "image=${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
           echo "commit=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Login en GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Construir y publicar imagen
         run: |
-          IMAGE="${IMAGE_NAME,,}"
+          VERSION=$(grep -m1 -oP '(?<=<version>)[^<]+' pom.xml)
           docker build \
-            --build-arg APP_VERSION=1.0.0 \
+            --build-arg APP_VERSION="$VERSION" \
             --build-arg APP_COMMIT=${{ steps.meta.outputs.commit }} \
-            -t "$IMAGE:${{ steps.meta.outputs.tag }}" \
-            -t "$IMAGE:latest" .
-          docker push "$IMAGE:${{ steps.meta.outputs.tag }}"
-          docker push "$IMAGE:latest"
-          echo "### Imagen publicada" >> "$GITHUB_STEP_SUMMARY"
-          echo '`'"$IMAGE:${{ steps.meta.outputs.tag }}"'`' >> "$GITHUB_STEP_SUMMARY"
+            -t "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}" \
+            -t "${{ steps.meta.outputs.image }}:latest" .
+          docker push "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}"
+          docker push "${{ steps.meta.outputs.image }}:latest"
+          {
+            echo "### Imagen publicada"
+            echo '`'"${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}"'`'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   deploy-test:
-    name: "Stage 2 - Deploy en ambiente de pruebas"
+    name: "Stage 2 y 3 - Deploy Blue-Green, acceptance tests y rollback"
     runs-on: ubuntu-latest
     needs: build-image
     environment:
       name: pruebas
-      url: ${{ vars.APP_BASE_URL }}
-    outputs:
-      previous_tag: ${{ steps.previous.outputs.tag }}
     env:
-      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-      COOLIFY_APP_UUID: ${{ secrets.COOLIFY_APP_UUID }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Registrar versión actualmente desplegada (para rollback)
-        id: previous
-        run: |
-          TAG=$(scripts/coolify.sh current-tag)
-          echo "Tag desplegado antes de este deploy: $TAG"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Desplegar nueva versión en Coolify
-        run: scripts/coolify.sh deploy "${{ needs.build-image.outputs.tag }}"
-
-      - name: Verificar que la nueva versión está activa
-        run: scripts/coolify.sh wait-version "${{ vars.APP_BASE_URL }}" "${{ needs.build-image.outputs.commit }}"
-
-      - name: Resumen
-        run: |
-          {
-            echo "### Despliegue en ambiente de pruebas"
-            echo "- Versión anterior: \`${{ steps.previous.outputs.tag }}\`"
-            echo "- Versión desplegada: \`${{ needs.build-image.outputs.tag }}\`"
-            echo "- URL: ${{ vars.APP_BASE_URL }}"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  acceptance-tests:
-    name: "Stage 3 - Acceptance tests (Selenium)"
-    runs-on: ubuntu-latest
-    needs: [build-image, deploy-test]
+      IMAGE: ${{ needs.build-image.outputs.image }}
+      NEW_TAG: ${{ needs.build-image.outputs.tag }}
+      NEW_COMMIT: ${{ needs.build-image.outputs.commit }}
+      APP_URL: http://localhost:8080
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -127,87 +99,136 @@ jobs:
           java-version: '17'
           cache: maven
 
-      - name: Ejecutar pruebas de aceptación contra el ambiente de pruebas
-        run: mvn -B -ntp verify -Pacceptance -Dapp.baseUrl="${{ vars.APP_BASE_URL }}"
+      - name: Login en GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resumen de resultados
+      # ---------- Stage 2: despliegue Blue-Green ----------
+      - name: "[Deploy] Levantar router del ambiente de pruebas"
+        run: scripts/blue-green.sh up-router
+
+      - name: "[Deploy] BLUE = última versión estable (la que está 'en producción')"
+        id: blue
+        run: |
+          if docker pull "$IMAGE:stable" >/dev/null 2>&1; then
+            BLUE_TAG=stable
+          else
+            echo "No existe imagen 'stable' (primer despliegue); BLUE usará la imagen 'latest' anterior"
+            docker pull "$IMAGE:latest" >/dev/null
+            BLUE_TAG=latest
+          fi
+          BLUE_COMMIT=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE:$BLUE_TAG" | grep '^APP_COMMIT=' | cut -d= -f2)
+          echo "tag=$BLUE_TAG" >> "$GITHUB_OUTPUT"
+          echo "commit=$BLUE_COMMIT" >> "$GITHUB_OUTPUT"
+          scripts/blue-green.sh start blue "$IMAGE:$BLUE_TAG" "$BLUE_COMMIT"
+          scripts/blue-green.sh wait-healthy blue
+          echo "Versión servida por el router antes del despliegue:"
+          curl -fsS "$APP_URL/api/info"; echo
+
+      - name: "[Deploy] GREEN = nueva versión candidata"
+        run: |
+          docker pull "$IMAGE:$NEW_TAG" >/dev/null
+          scripts/blue-green.sh start green "$IMAGE:$NEW_TAG" "$NEW_COMMIT"
+          scripts/blue-green.sh wait-healthy green
+
+      - name: "[Deploy] Smoke test de GREEN antes de recibir tráfico"
+        run: |
+          INFO=$(scripts/blue-green.sh info green)
+          echo "GREEN responde: $INFO"
+          echo "$INFO" | grep -q "\"commit\":\"$NEW_COMMIT\"" || { echo "::error::GREEN no reporta el commit esperado"; exit 1; }
+
+      - name: "[Deploy] Cambiar el tráfico del router a GREEN"
+        run: |
+          scripts/blue-green.sh switch green
+          ACTIVO=$(scripts/blue-green.sh active)
+          echo "Slot activo: $ACTIVO"
+          [ "$ACTIVO" = "green" ] || { echo "::error::El router no cambió a green"; exit 1; }
+          echo "Versión servida por el router después del despliegue:"
+          curl -fsS "$APP_URL/api/info"; echo
+
+      # ---------- Stage 3: pruebas de aceptación ----------
+      - name: "[Acceptance] Pruebas E2E con Selenium contra el ambiente de pruebas"
+        id: acceptance
+        run: mvn -B -ntp verify -Pacceptance -Dapp.baseUrl="$APP_URL"
+
+      - name: "[Acceptance] Resumen de resultados"
         if: always()
         run: scripts/resumen-pruebas.sh "Pruebas de aceptación (E2E)" target/failsafe-reports >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Guardar reportes
+      - name: "[Acceptance] Guardar reportes"
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: reportes-aceptacion
           path: target/failsafe-reports
 
-      - name: Falla simulada (solo para demostrar el rollback)
+      - name: "[Acceptance] Falla simulada (solo para demostrar el rollback)"
         if: ${{ inputs.simular_falla == true }}
         run: |
           echo "::error::Falla simulada en acceptance tests para demostrar el rollback automático"
           exit 1
 
-  rollback:
-    name: "Stage 4 - Rollback automático"
-    runs-on: ubuntu-latest
-    needs: [build-image, deploy-test, acceptance-tests]
-    # Se ejecuta solo si el deploy funcionó pero las pruebas de aceptación fallaron
-    if: ${{ always() && needs.deploy-test.result == 'success' && needs.acceptance-tests.result == 'failure' }}
-    env:
-      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-      COOLIFY_APP_UUID: ${{ secrets.COOLIFY_APP_UUID }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Volver a la versión anterior
+      # ---------- Rollback automático ----------
+      - name: "[Rollback] Volver el tráfico a BLUE (versión anterior)"
+        id: rollback
+        if: ${{ failure() }}
         run: |
-          PREV="${{ needs.deploy-test.outputs.previous_tag }}"
-          if [ -z "$PREV" ] || [ "$PREV" = "${{ needs.build-image.outputs.tag }}" ]; then
-            echo "No hay versión anterior distinta; se usa la imagen 'stable'"
-            PREV=stable
-          fi
-          echo "Rollback a: $PREV"
-          scripts/coolify.sh deploy "$PREV"
-          echo "PREV=$PREV" >> "$GITHUB_ENV"
-
-      - name: Verificar que la versión fallida ya no está activa
-        run: |
-          for i in $(seq 1 30); do
-            ACTUAL=$(curl -fsS "${{ vars.APP_BASE_URL }}/api/info" | python3 -c 'import sys,json; print(json.load(sys.stdin)["commit"])' || true)
-            echo "Commit activo: $ACTUAL"
-            if [ -n "$ACTUAL" ] && [ "$ACTUAL" != "${{ needs.build-image.outputs.commit }}" ]; then
-              echo "Rollback verificado: la app corre la versión anterior ($ACTUAL)"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "::error::La versión fallida sigue activa"; exit 1
-
-      - name: Resumen
-        run: |
+          echo "::warning::Las pruebas de aceptación fallaron: ejecutando ROLLBACK a BLUE (${{ steps.blue.outputs.tag }})"
+          scripts/blue-green.sh switch blue
+          ACTIVO=$(scripts/blue-green.sh active)
+          INFO=$(curl -fsS "$APP_URL/api/info")
+          echo "Slot activo tras el rollback: $ACTIVO"
+          echo "Versión servida tras el rollback: $INFO"
+          [ "$ACTIVO" = "blue" ] || { echo "::error::El rollback no dejó activo a blue"; exit 1; }
+          echo "$INFO" | grep -q '"slot":"blue"' || { echo "::error::El router no está sirviendo la versión anterior"; exit 1; }
+          docker rm -f app-green >/dev/null
+          echo "Contenedor GREEN (versión defectuosa) retirado. Rollback verificado."
           {
-            echo "### ROLLBACK ejecutado"
-            echo "- Versión con problemas: \`${{ needs.build-image.outputs.tag }}\`"
-            echo "- Versión restaurada: \`$PREV\`"
+            echo "### ROLLBACK automático ejecutado"
+            echo "- Versión con problemas (GREEN): \`$NEW_TAG\` (commit $NEW_COMMIT)"
+            echo "- Versión restaurada (BLUE): \`${{ steps.blue.outputs.tag }}\` (commit ${{ steps.blue.outputs.commit }})"
+            echo "- Slot activo: **$ACTIVO**"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: "[Deploy] Retirar BLUE (despliegue exitoso)"
+        if: ${{ success() }}
+        run: |
+          docker rm -f app-blue >/dev/null
+          echo "GREEN quedó como versión activa; BLUE retirado."
+          {
+            echo "### Despliegue Blue-Green exitoso"
+            echo "- Versión anterior (BLUE): \`${{ steps.blue.outputs.tag }}\` (commit ${{ steps.blue.outputs.commit }})"
+            echo "- Versión desplegada (GREEN): \`$NEW_TAG\` (commit $NEW_COMMIT)"
+            echo "- Slot activo: **$(scripts/blue-green.sh active)**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "[Ambiente] Estado final de los contenedores"
+        if: always()
+        run: docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+
+      - name: "[Ambiente] Limpiar"
+        if: always()
+        run: scripts/blue-green.sh down
+
   promote:
-    name: "Stage 5 - Marcar versión como estable"
+    name: "Stage 4 - Marcar versión como estable"
     runs-on: ubuntu-latest
-    needs: [build-image, acceptance-tests]
+    needs: [build-image, deploy-test]
     if: ${{ success() }}
     steps:
       - name: Login en GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Etiquetar la imagen como "stable"
         run: |
-          IMAGE="${IMAGE_NAME,,}"
+          IMAGE="${{ needs.build-image.outputs.image }}"
           docker pull "$IMAGE:${{ needs.build-image.outputs.tag }}"
           docker tag "$IMAGE:${{ needs.build-image.outputs.tag }}" "$IMAGE:stable"
           docker push "$IMAGE:stable"
