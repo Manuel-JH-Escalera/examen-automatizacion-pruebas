@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gestor de Tareas</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #222; }
+    h1 { margin-bottom: 4px; }
+    .version { color: #777; font-size: 0.9em; margin-bottom: 24px; }
+    form { display: flex; gap: 8px; margin-bottom: 16px; }
+    input { flex: 1; padding: 8px; font-size: 1em; }
+    button { padding: 8px 12px; cursor: pointer; }
+    ul { list-style: none; padding: 0; }
+    li { display: flex; align-items: center; gap: 8px; padding: 8px; border-bottom: 1px solid #ddd; }
+    li.completada .titulo { text-decoration: line-through; color: #888; }
+    .titulo { flex: 1; }
+    #resumen { margin-top: 16px; font-weight: bold; }
+    .error { color: #b00020; }
+  </style>
+</head>
+<body>
+  <h1>Gestor de Tareas</h1>
+  <div class="version">Versión: <span id="version">...</span></div>
+
+  <form id="form-tarea">
+    <input id="titulo" name="titulo" placeholder="Nueva tarea" autocomplete="off">
+    <button id="btn-agregar" type="submit">Agregar</button>
+  </form>
+  <p id="error" class="error"></p>
+
+  <ul id="lista-tareas"></ul>
+  <div id="resumen">Pendientes: <span id="pendientes">0</span> | Avance: <span id="avance">0</span>%</div>
+
+  <script>
+    const API = '/api/tareas';
+
+    function escapar(texto) {
+      const div = document.createElement('div');
+      div.textContent = texto;
+      return div.innerHTML;
+    }
+
+    async function cargar() {
+      const tareas = await (await fetch(API)).json();
+      const lista = document.getElementById('lista-tareas');
+      lista.innerHTML = '';
+      for (const t of tareas) {
+        const li = document.createElement('li');
+        li.className = 'tarea' + (t.completada ? ' completada' : '');
+        li.dataset.id = t.id;
+        li.innerHTML = '<span class="titulo">' + escapar(t.titulo) + '</span>' +
+          (t.completada ? '' : '<button class="btn-completar" type="button">Completar</button>') +
+          '<button class="btn-eliminar" type="button">Eliminar</button>';
+        lista.appendChild(li);
+      }
+      const r = await (await fetch(API + '/resumen')).json();
+      document.getElementById('pendientes').textContent = r.pendientes;
+      document.getElementById('avance').textContent = r.porcentajeAvance;
+    }
+
+    document.getElementById('form-tarea').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const input = document.getElementById('titulo');
+      const resp = await fetch(API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ titulo: input.value, descripcion: '' })
+      });
+      const errorEl = document.getElementById('error');
+      if (!resp.ok) {
+        errorEl.textContent = (await resp.json()).error;
+        return;
+      }
+      errorEl.textContent = '';
+      input.value = '';
+      await cargar();
+    });
+
+    document.getElementById('lista-tareas').addEventListener('click', async (e) => {
+      const li = e.target.closest('li');
+      if (!li) return;
+      if (e.target.classList.contains('btn-completar')) {
+        await fetch(API + '/' + li.dataset.id + '/completar', { method: 'PUT' });
+      } else if (e.target.classList.contains('btn-eliminar')) {
+        await fetch(API + '/' + li.dataset.id, { method: 'DELETE' });
+      }
+      await cargar();
+    });
+
+    fetch('/api/info').then(r => r.json()).then(i => {
+      document.getElementById('version').textContent = i.version + ' (' + i.commit + ')';
+    });
+    cargar();
+  </script>
+</body>
+</html>
