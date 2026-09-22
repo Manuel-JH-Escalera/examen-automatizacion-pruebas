@@ -24,7 +24,7 @@
 
   <groupId>cl.iplacex</groupId>
   <artifactId>gestor-tareas</artifactId>
-  <version>1.0.0</version>
+  <version>1.1.0</version>
   <packaging>jar</packaging>
   <name>gestor-tareas</name>
   <description>Gestor de tareas con pipeline de CI/CD y pruebas automatizadas</description>

@@ -8,8 +8,8 @@ import java.util.Map;
 
 /**
  * Expone información de la versión desplegada.
- * El pipeline de despliegue la usa para verificar qué versión está activa
- * (y para evidenciar el rollback).
+ * El deployment pipeline la usa para verificar qué versión y qué slot
+ * (blue o green) está atendiendo el tráfico, y para evidenciar el rollback.
  */
 @RestController
 public class InfoController {
@@ -20,8 +20,15 @@ public class InfoController {
     @Value("${app.commit:local}")
     private String commit;
 
+    @Value("${app.slot:local}")
+    private String slot;
+
     @GetMapping("/api/info")
     public Map<String, String> info() {
-        return Map.of("aplicacion", "gestor-tareas", "version", version, "commit", commit);
+        return Map.of(
+                "aplicacion", "gestor-tareas",
+                "version", version,
+                "commit", commit,
+                "slot", slot);
     }
 }

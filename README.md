@@ -26,7 +26,7 @@ de pruebas y **rollback automático**.
 | Cobertura | JaCoCo |
 | Contenedores | Docker (imagen multi-stage) publicada en GitHub Container Registry |
 | CI/CD | GitHub Actions |
-| Ambiente de pruebas | VPS con Coolify (despliegue por API) |
+| Ambiente de pruebas | Contenedores Docker en el runner: router nginx + slots Blue/Green |
 
 ### Funcionalidad de la aplicación
 
@@ -39,7 +39,7 @@ de pruebas y **rollback automático**.
 | `DELETE` | `/api/tareas/{id}` | Elimina una tarea |
 | `GET` | `/api/tareas/resumen` | Total, pendientes y % de avance |
 | `GET` | `/api/info` | Versión y commit desplegados (usado por el pipeline) |
-| `GET` | `/actuator/health` | Health check (usado por Docker/Coolify) |
+| `GET` | `/actuator/health` | Health check (usado por Docker y el pipeline Blue-Green) |
 
 ### Estructura del repositorio
 
@@ -49,10 +49,9 @@ de pruebas y **rollback automático**.
 ├── Dockerfile                      # Imagen multi-stage (build Maven + JRE Alpine)
 ├── .github/workflows/
 │   ├── ci.yml                      # Pipeline CI: build → unitarias → integración → imagen
-│   ├── cd.yml                      # Deployment pipeline: imagen → deploy → acceptance → rollback/promote
-│   └── rollback.yml                # Rollback manual a cualquier versión publicada
+│   └── cd.yml                      # Deployment pipeline: imagen → deploy Blue-Green → acceptance → rollback/promote
 ├── scripts/
-│   ├── coolify.sh                  # Despliegue/rollback contra la API de Coolify
+│   ├── blue-green.sh               # Router nginx + contenedores blue/green, switch y rollback
 │   └── resumen-pruebas.sh          # Resumen Markdown de reportes Surefire/Failsafe
 ├── src/main/java/cl/iplacex/tareas # Aplicación (modelo, servicio, controladores)
 ├── src/main/resources/static       # Interfaz web (index.html)
@@ -81,10 +80,10 @@ Otras verificaciones automatizadas:
 
 - **Smoke test de la imagen Docker** (CI, stage 4): la imagen se construye, arranca y responde
   `/actuator/health`.
-- **Verificación de versión post-deploy** (CD): el pipeline consulta `/api/info` y confirma que el
-  commit desplegado es el esperado, antes de ejecutar las pruebas de aceptación.
-- **Puerta de calidad para el rollback**: si las pruebas de aceptación fallan, el stage `rollback`
-  restaura la versión anterior de forma automática y verifica que quedó activa.
+- **Smoke test de GREEN antes de recibir tráfico** (CD): el pipeline consulta `/api/info` del
+  contenedor nuevo y confirma que reporta el commit esperado antes de enrutarle tráfico.
+- **Puerta de calidad para el rollback**: si las pruebas de aceptación fallan, el paso de rollback
+  devuelve el tráfico a BLUE de forma automática y verifica que la versión anterior atiende.
 
 ---
 
@@ -124,31 +123,39 @@ build ──► unit-tests ──► integration-tests ──► docker-image
 Se ejecuta al hacer push a `main` (o manualmente desde *Actions*).
 
 ```
-build-image ──► deploy-test ──► acceptance-tests ──► promote (éxito)
-                                        │
-                                        └──────────► rollback (falla)
+build-image ──► deploy-test (Blue-Green + acceptance tests + rollback) ──► promote
+```
+
+**Ambiente de pruebas.** Se levanta con Docker en el runner mediante `scripts/blue-green.sh`:
+un router **nginx** expone un único punto de entrada (`http://localhost:8080`) y enruta el tráfico
+a uno de dos contenedores, **BLUE** (versión estable actual) o **GREEN** (versión nueva). Cambiar de
+versión solo reescribe el upstream de nginx y lo recarga, así que el cambio es instantáneo y el
+rollback consiste en volver a BLUE. Cada respuesta incluye la cabecera `X-Deploy-Slot` y
+`/api/info` reporta `slot`, `commit` y `version`, lo que permite verificar en todo momento qué
+versión atiende.
+
+```
+                 ┌──────────────┐
+ http://localhost:8080 ─►│ router nginx │──► app-blue  (imagen :stable, versión anterior)
+                 │  (switch)    │──► app-green (imagen :sha-xxxxxxx, versión nueva)
+                 └──────────────┘
 ```
 
 1. **build-image**: construye la imagen Docker con `APP_VERSION` y `APP_COMMIT` y la publica en
    GHCR con el tag inmutable `sha-<commit>` (y `latest`).
-2. **deploy-test**: registra el tag actualmente desplegado (para poder volver), actualiza la
-   aplicación en Coolify con el nuevo tag, lanza el despliegue por API, espera a que termine y
-   confirma en `/api/info` que la nueva versión está activa.
-   Coolify inicia el contenedor nuevo, espera a que su health check sea exitoso y recién
-   entonces retira el anterior (estrategia estilo *Blue-Green* de contenedores).
-3. **acceptance-tests**: ejecuta las pruebas Selenium contra la URL pública del ambiente de pruebas.
-4. **rollback** (solo si falla el stage anterior): vuelve al tag anterior mediante Coolify y
-   verifica que el commit fallido ya no está activo.
-5. **promote** (solo si todo pasó): etiqueta la imagen como `stable`, la última versión
-   conocida como buena.
+2. **deploy-test** (stages 2 y 3 en el mismo runner, porque comparten el ambiente):
+   - *Deploy*: levanta el router; arranca **BLUE** con la imagen `stable` (o `latest` en el primer
+     despliegue) y espera su health check; arranca **GREEN** con la imagen nueva y espera su health
+     check; hace un *smoke test* de GREEN y recién entonces cambia el tráfico del router a GREEN.
+   - *Acceptance*: ejecuta las pruebas Selenium contra el router (es decir, contra GREEN).
+   - *Rollback* (solo si algo falló): devuelve el tráfico a BLUE, verifica por `X-Deploy-Slot` y
+     `/api/info` que la versión anterior atiende y retira el contenedor GREEN.
+   - Si todo pasó, retira BLUE y GREEN queda como versión activa.
+3. **promote** (solo si todo pasó): etiqueta la imagen como `stable`, la última versión conocida
+   como buena, que será el BLUE del próximo despliegue.
 
 El pipeline manual admite el parámetro **`simular_falla`**, que hace fallar el stage de
 aceptación a propósito para **demostrar el rollback automático** con evidencia real.
-
-### 4.3 Rollback manual – `.github/workflows/rollback.yml`
-
-Desde *Actions → Rollback manual → Run workflow* se puede restaurar cualquier tag publicado
-(`stable` por defecto o un `sha-xxxxxxx` específico).
 
 ---
 
@@ -186,18 +193,19 @@ docker build -t gestor-tareas .
 docker run -p 8080:8080 gestor-tareas
 ```
 
-### Configuración necesaria para el deployment pipeline
+### Ambiente Blue-Green en local (opcional, requiere Docker)
 
-En Coolify se crea una aplicación de tipo **Docker Image** apuntando a
-`ghcr.io/manuel-jh-escalera/gestor-tareas` con un dominio público y health check en `/actuator/health`.
-Luego, en el repositorio de GitHub (*Settings → Secrets and variables → Actions*):
-
-| Tipo | Nombre | Valor |
-|---|---|---|
-| Secret | `COOLIFY_URL` | URL del panel de Coolify, ej. `https://coolify.midominio.cl` |
-| Secret | `COOLIFY_TOKEN` | Token de API de Coolify (*Keys & Tokens → API tokens*) |
-| Secret | `COOLIFY_APP_UUID` | UUID de la aplicación en Coolify |
-| Variable | `APP_BASE_URL` | URL pública del ambiente de pruebas, ej. `https://tareas.midominio.cl` |
+```bash
+docker build --build-arg APP_COMMIT=v1 -t gestor-tareas:v1 .
+docker build --build-arg APP_COMMIT=v2 -t gestor-tareas:v2 .
+scripts/blue-green.sh up-router
+scripts/blue-green.sh start blue  gestor-tareas:v1 v1 && scripts/blue-green.sh wait-healthy blue
+scripts/blue-green.sh start green gestor-tareas:v2 v2 && scripts/blue-green.sh wait-healthy green
+scripts/blue-green.sh switch green      # despliegue
+curl -i http://localhost:8080/api/info  # X-Deploy-Slot: green
+scripts/blue-green.sh switch blue       # rollback
+scripts/blue-green.sh down
+```
 
 ---
 
@@ -211,7 +219,7 @@ Las capturas de las ejecuciones se encuentran en `docs/capturas/`:
 | `02-ramas-gitflow.png` | Grafo de ramas (`feature`, `develop`, `release`, `main`) |
 | `03-ci-ejecucion-exitosa.png` | Pipeline CI con los cuatro stages en verde |
 | `04-ci-resumen-pruebas.png` | Resumen de pruebas unitarias e integración en el Summary |
-| `05-cd-despliegue-exitoso.png` | Deployment pipeline con deploy, acceptance tests y promote |
-| `06-app-desplegada.png` | Aplicación funcionando en el ambiente de pruebas (Coolify) |
-| `07-cd-rollback-automatico.png` | Ejecución con falla simulada y stage de rollback ejecutado |
-| `08-rollback-manual.png` | Workflow de rollback manual restaurando la versión `stable` |
+| `05-cd-despliegue-exitoso.png` | Deployment pipeline exitoso: imagen, deploy Blue-Green, acceptance tests y promote |
+| `06-cd-blue-green-switch.png` | Log del cambio de tráfico de BLUE a GREEN y versión servida por el router |
+| `07-cd-rollback-automatico.png` | Ejecución con falla simulada: paso de rollback devolviendo el tráfico a BLUE |
+| `08-cd-resumen-rollback.png` | Summary de la ejecución con el rollback y las versiones involucradas |
